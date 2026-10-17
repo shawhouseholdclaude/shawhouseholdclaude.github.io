@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crokinole scorecard generator</title>
+
+<!--
+  HOW THIS FILE IS ORGANIZED
+  1. Page styles (screen): the settings panel and the on-screen preview.
+  2. Card styles: everything that controls how a printed card looks. Sizes are in
+     millimetres so the printout is physically the same size on every printer.
+  3. Script, in four parts:
+       a. Schedule: works out who plays whom in each game (the "circle method").
+       b. Layout: decides how many columns of games fit on each card.
+       c. Drawing: builds the HTML for a card, a sheet, and the roster page.
+       d. Wiring: reads the settings panel and redraws whenever something changes.
+-->
+
+<!-- Set from script: tells the browser which paper size to print on. -->
+<style id="pg"></style>
+
+<style>
+  :root { --ink:#1b1f23; --muted:#5d646b; --line:#d3d8db; --bg:#eef0ee; --accent:#1f5f55; }
+  [hidden] { display:none !important; }
+  * { box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; color:var(--ink); background:var(--bg); }
+
+  /* ---------- 1. Page styles (screen) ---------- */
+  .app { display:grid; grid-template-columns:330px 1fr; min-height:100vh; }
+  .panel { background:#fff; border-right:1px solid var(--line); padding:20px 20px 28px; display:flex; flex-direction:column; gap:14px; }
+  .panel h1 { font-size:20px; font-weight:600; margin:0; }
+  .panel .lead { margin:0; font-size:13px; color:var(--muted); line-height:1.5; }
+  .panel label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  .panel input[type=text], .panel input[type=number], .panel select, .panel textarea {
+    font:inherit; font-size:14px; color:var(--ink); padding:7px 8px; border:1px solid #b9c0c4; border-radius:6px; background:#fff; width:100%; }
+  .panel input:focus, .panel select:focus, .panel textarea:focus, .panel button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .panel input:disabled { background:#f1f2f2; color:#8b9297; }
+  .panel textarea { resize:vertical; }
+  .panel fieldset { border:1px solid var(--line); border-radius:8px; padding:12px; margin:0; display:flex; flex-direction:column; gap:10px; }
+  .panel legend { font-size:13px; font-weight:600; padding:0 4px; color:var(--ink); }
+  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .panel label.chk { flex-direction:row; align-items:flex-start; gap:8px; color:var(--ink); }
+  .panel label.chk input { margin-top:2px; }
+  .panel button { font:inherit; font-size:15px; font-weight:600; padding:11px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  .panel button:hover { background:#184d45; }
+  #msgs { font-size:13px; line-height:1.5; display:flex; flex-direction:column; gap:6px; }
+  #msgs p { margin:0; }
+  #msgs .warn { color:#8a4b00; background:#fff4e0; border:1px solid #f0d3a0; border-radius:6px; padding:6px 8px; }
+  .tip { font-size:12px; color:var(--muted); margin:0; line-height:1.5; }
+  .preview { padding:22px; overflow:auto; }
+  .sheet { position:relative; width:var(--sw); height:calc(var(--sh) - .5mm); background:#fff; margin:0 auto 8mm;
+           box-shadow:0 0 0 1px #cfd4d7, 0 2px 8px rgba(0,0,0,.08); overflow:hidden; break-after:page; page-break-after:always; }
+  .sheet:last-child { break-after:auto; page-break-after:auto; }
+  @media (max-width:900px) { .app { grid-template-columns:1fr; } .panel { border-right:0; border-bottom:1px solid var(--line); } }
+  @media print {
+    body { background:#fff; }
+    .app { display:block; }
+    .panel { display:none; }
+    .preview { padding:0; overflow:visible; }
+    .sheet { margin:0; box-shadow:none; }
+  }
+
+  /* ---------- 2. Card styles (all sizes in mm) ---------- */
+  .cells { position:absolute; inset:7mm; display:flex; flex-direction:column; }
+  .cell { flex:1; position:relative; min-height:0; }
+  .cell + .cell { border-top:.3mm dashed #888; }          /* cut line between cards */
+  .cells.row { flex-direction:row; }                      /* vertical cards sit side by side */
+  .cells.row .cell + .cell { border-top:0; border-left:.3mm dashed #888; }
+  .card { position:absolute; inset:0; color:#000; }
+  /* Corner markers: the scanner finds the card with these. Each has at least 2 mm of clear space around it.
+     The top-left one is larger, so the scanner always knows which way up the card is and which markers belong
+     to this card rather than to its neighbour on the sheet. */
+  .mk { position:absolute; width:5mm; height:5mm; background:#000; }
+  .mk.tl { top:2.5mm; left:2.5mm; width:6.5mm; height:6.5mm; } .mk.tr { top:2.5mm; right:2.5mm; }
+  .mk.bl { bottom:2.5mm; left:2.5mm; } .mk.br { bottom:2.5mm; right:2.5mm; }
+  .cin { position:absolute; left:11mm; right:9.5mm; top:11mm; bottom:9.5mm; display:flex; flex-direction:column; }
+
+  .hdr { height:16mm; display:flex; justify-content:space-between; align-items:flex-start; gap:4mm; flex:none; }
+  .hl { flex:1; min-width:0; }
+  .tn .gl { font-size:3.2mm; font-weight:600; color:#444; margin-left:3mm; }
+  .tn { font-size:4.6mm; font-weight:700; line-height:1.1; margin-bottom:2.2mm; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .fields { display:flex; gap:4mm; align-items:flex-end; font-size:2.6mm; }
+  .f { display:flex; align-items:flex-end; gap:1mm; }
+  .f.grow { flex:1; min-width:0; }
+  .f u { display:block; flex:1; text-decoration:none; border-bottom:.25mm solid #333; min-width:12mm; height:4.6mm; font-size:3mm; line-height:4.2mm; padding-left:1mm; white-space:nowrap; overflow:hidden; }
+  .f b { font-size:3.6mm; line-height:1; }
+  .qr { width:16mm; height:16mm; flex:none; }
+  .qr svg { display:block; width:100%; height:100%; }
+
+  .cols { flex:1; display:flex; gap:6mm; margin-top:1mm; min-height:0; }
+  .col { flex:1; min-width:0; }
+  .ch, .blk { display:grid; grid-template-columns:var(--numw) repeat(4,1fr) var(--totw) var(--oppw); column-gap:var(--gap); }
+  .ch { height:4.5mm; align-items:end; text-align:center; font-size:2mm; color:#444; }
+  .blk { grid-template-rows:1fr 1fr; row-gap:.8mm; border-top:.2mm solid #b5b5b5; padding:.6mm 0; }
+  .n { grid-row:span 2; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.4mm; font-weight:700; font-size:3.4mm; }
+  .n small { font-size:2mm; font-weight:600; color:#333; }
+  .rc { display:flex; align-items:center; justify-content:center; gap:.7mm; }
+  .b { width:var(--bd); height:var(--bd); border:.25mm solid #222; border-radius:50%; font-size:2mm; display:grid; place-items:center; color:#555; }
+  .bx { border:.25mm solid #444; border-radius:.6mm; position:relative; }
+  .bx[data-t]::before { content:attr(data-t); position:absolute; left:.6mm; top:.3mm; font-size:1.7mm; color:#aaa; }
+  .opp { font-size:2.2mm; line-height:1.15; display:flex; flex-direction:column; justify-content:center; overflow:hidden; padding-left:.6mm; }
+  .opp b { font-size:2.6mm; }
+  .opp em { font-style:normal; color:#444; font-size:2mm; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hatch { background:repeating-linear-gradient(135deg,#bbb 0 .3mm,transparent .3mm 1.4mm); }
+
+  .half { height:7mm; display:flex; align-items:center; justify-content:space-between; border-top:.35mm dashed #333; border-bottom:.35mm dashed #333; font-size:2.2mm; margin:.6mm 0; }
+  .half span { display:flex; align-items:center; gap:1mm; }
+  .half .bx { width:12mm; height:4.6mm; }
+
+  .ftr { height:9mm; display:flex; justify-content:space-between; align-items:flex-end; flex:none; }
+  .code { font-size:1.7mm; color:#555; line-height:1.35; white-space:nowrap; }
+  .tots { display:flex; gap:3mm; }
+  .tots span { display:flex; align-items:center; gap:1mm; font-size:2.1mm; white-space:nowrap; }
+  .tots .bx { width:11mm; height:6mm; }
+
+  /* roster and schedule page */
+  .sheet.roster { height:auto; min-height:calc(var(--sh) - .5mm); padding:14mm; overflow:visible; }
+  .roster h2 { font-size:5mm; margin:0 0 1mm; }
+  .roster .rn { font-size:3mm; color:#555; margin:0 0 5mm; }
+  .roster table { border-collapse:collapse; font-size:3mm; width:100%; }
+  .roster thead { display:table-header-group; }
+  .roster tr { break-inside:avoid; }
+  .roster th, .roster td { border:.2mm solid #999; padding:.8mm 1.4mm; text-align:center; }
+  .roster td.nm { text-align:left; min-width:40mm; }
+  .roster th { background:#eee; }
+  .roster .tb { color:#555; font-size:2.4mm; }
+  .roster h3 { font-size:4mm; margin:7mm 0 2mm; }
+  .roster td.pr { white-space:nowrap; font-size:2.6mm; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="panel">
+    <h1>Crokinole scorecards</h1>
+    <p class="lead">Set up the tournament, check the preview, then print or save as a PDF.</p>
+
+    <label>Tournament name
+      <input type="text" id="tname" value="My crokinole tournament">
+    </label>
+    <label>Tournament code <input type="text" id="tcode" maxlength="6"></label>
+    <label class="chk"><input type="checkbox" id="catOn"> Add an extra header field (such as Category)</label>
+    <div class="row2" id="catRow" hidden>
+      <label>Label (can be blank) <input type="text" id="catLabel" value="Category"></label>
+      <label>Pre-filled value (optional) <input type="text" id="cat" placeholder="e.g. Open"></label>
+    </div>
+
+    <fieldset>
+      <legend>Participants</legend>
+      <label>How many
+        <input type="number" id="count" value="12" min="2" max="200">
+      </label>
+      <label>Names, one per line (optional)
+        <textarea id="names" rows="6" placeholder="Leave empty to print numbered cards with a blank name line"></textarea>
+      </label>
+      <label class="chk"><input type="checkbox" id="sort"> Sort names A to Z before numbering</label>
+    </fieldset>
+
+    <label><span id="gamesLbl">Games per card</span>
+      <input type="number" id="games" value="10" min="1" max="30">
+    </label>
+    <label>Card shape
+      <select id="orient">
+        <option value="V">Vertical: games run top to bottom</option>
+        <option value="H">Horizontal: wide cards</option>
+      </select>
+    </label>
+    <fieldset>
+      <legend>Schedule</legend>
+      <label>Format
+        <select id="mode">
+          <option value="P">One pool: everyone plays everyone</option>
+          <option value="G">Groups: separate round robins</option>
+        </select>
+      </label>
+      <label id="gsizeBox" hidden>Players per group (about)
+        <input type="number" id="gsize" value="8" min="2" max="200">
+      </label>
+      <label>How opponents are decided
+        <select id="sched">
+          <option value="F">Fixed schedule: opponents printed on cards</option>
+          <option value="O">Open: players write in their opponent</option>
+        </select>
+      </label>
+      <div id="tblBox" style="display:flex;flex-direction:column;gap:10px">
+        <label class="chk"><input type="checkbox" id="tblOn" checked> Print a table number on each game</label>
+        <label><span id="tblLbl">Tables available (blank = just enough)</span>
+          <input type="number" id="tables" min="1" max="100" placeholder="Auto">
+        </label>
+      </div>
+    </fieldset>
+    <div class="row2">
+      <label>Paper
+        <select id="paper"><option value="LTR">Letter</option><option value="A4">A4</option></select>
+      </label>
+      <label>Cards per page
+        <select id="per"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option></select>
+      </label>
+    </div>
+    <p class="tip" id="per3tip" hidden>3 per page needs horizontal cards. Three vertical cards would be too narrow for readable bubbles.</p>
+
+    <label class="chk"><input type="checkbox" id="half" checked> Add a halfway scan point</label>
+    <label class="chk"><input type="checkbox" id="roster" checked> Add a roster and schedule page</label>
+
+    <button id="print" type="button">Print or save as PDF</button>
+    <div id="msgs" aria-live="polite"></div>
+    <p class="tip">In the print dialog, set the scale to 100% (not "fit to page"), margins to none, and turn off headers and footers. Pick the same paper size you chose here.</p>
+
+    <fieldset id="pubBox">
+      <legend>Scanning with phones</legend>
+      <label>Rounds not played when time runs out
+        <select id="unplayed"><option value="zero">0 points each (WCC)</option><option value="one">1 point each</option></select>
+      </label>
+      <button id="publish" type="button">Publish for scanning</button>
+      <p class="tip" id="pubMsg">Publish before printing: players' phones then know this tournament's players, schedule and card layout. Publish again after any change, and reprint.</p>
+    </fieldset>
+  </aside>
+
+  <main class="preview" id="out"></main>
+</div>
+
+<script src="config.js"></script>
+<script>
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/* Web address the QR code on each card points to. PLACEHOLDER until the scan page is hosted:
+   change it here (and nowhere else) once there is a real address. Capital letters keep the
+   QR code small (a phone treats web addresses the same in either case). */
+const CFG = window.CROK_CONFIG || {};
+const SCAN_ADDRESS = ((CFG.site || 'HTTPS://CROK.EXAMPLE/') + 'C/').toUpperCase();   // site comes from config.js once hosted
+
+/* What the QR code holds: the scan address and the card ID (tournament code + player number),
+   e.g. HTTPS://SHAWHOUSEHOLDCLAUDE.GITHUB.IO/C/YDN7-01. The card's layout comes from the published
+   tournament setup, so it stays out of the QR code (a shorter text keeps the code's squares bigger). */
+const qrText = (tcode, num) => (SCAN_ADDRESS + tcode + '-' + num).toUpperCase();
+
+/* ============ QR CODE ENCODER ============
+   Small, self-contained QR encoder (no internet needed). Model 2 QR codes, versions 1-10,
+   error correction M or Q, alphanumeric mode (0-9, A-Z, space $ % * + - . / :) or byte mode.
+   Follows ISO/IEC 18004; structure modelled on Project Nayuki's public QR generator.
+   qrEncode(text, ecl, forceMask) -> {size, version, mask, dark(x, y)} */
+const QR = (() => {
+  const ALNUM = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+  /* per version: [ec codewords per block, [blocks, data codewords], [blocks, data codewords]] */
+  const BLOCKS = {
+    M: [null, [10,[1,16]], [16,[1,28]], [26,[1,44]], [18,[2,32]], [24,[2,43]], [16,[4,27]], [18,[4,31]],
+        [22,[2,38],[2,39]], [22,[3,36],[2,37]], [26,[4,43],[1,44]]],
+    Q: [null, [13,[1,13]], [22,[1,22]], [18,[2,17]], [26,[2,24]], [18,[2,15],[2,16]], [24,[4,19]],
+        [18,[2,14],[4,15]], [22,[4,18],[2,19]], [20,[4,16],[4,17]], [24,[6,19],[2,20]]]
+  };
+  const ECL_BITS = {M: 0, Q: 3};
+  const ALIGN = [null, [], [6,18], [6,22], [6,26], [6,30], [6,34], [6,22,38], [6,24,42], [6,26,46], [6,28,50]];
+
+  const gfMul = (a, b) => { let z = 0; for (let i = 7; i >= 0; i--) { z = (z << 1) ^ ((z >>> 7) * 0x11D); z ^= ((b >>> i) & 1) * a; } return z & 255; };
+  function rsDivisor(deg) {
+    const r = new Array(deg).fill(0); r[deg - 1] = 1; let root = 1;
+    for (let i = 0; i < deg; i++) {
+      for (let j = 0; j < deg; j++) { r[j] = gfMul(r[j], root); if (j + 1 < deg) r[j] ^= r[j + 1]; }
+      root = gfMul(root, 2);
+    }
+    return r;
+  }
+  function rsRemainder(data, div) {
+    const r = div.map(() => 0);
+    for (const b of data) { const f = b ^ r.shift(); r.push(0); div.forEach((c, i) => r[i] ^= gfMul(c, f)); }
+    return r;
+  }
+
+  function encode(text, ecl = 'M', forceMask = -1) {
+    const alnum = [...text].every(c => ALNUM.includes(c));
+    const bytes = alnum ? null : Array.from(new TextEncoder().encode(text));
+    let ver = 0, spec, dataCw;
+    for (let v = 1; v <= 10; v++) {
+      spec = BLOCKS[ecl][v];
+      dataCw = spec.slice(1).reduce((s, g) => s + g[0] * g[1], 0);
+      const countBits = alnum ? (v < 10 ? 9 : 11) : (v < 10 ? 8 : 16);
+      const need = 4 + countBits + (alnum ? 11 * Math.floor(text.length / 2) + 6 * (text.length % 2) : 8 * bytes.length);
+      if (need <= dataCw * 8) { ver = v; break; }
+    }
+    if (!ver) throw new Error('Text too long for a QR code on the card: ' + text);
+
+    /* ---- data bits ---- */
+    const bits = [];
+    const put = (val, n) => { for (let i = n - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+    if (alnum) {
+      put(2, 4); put(text.length, ver < 10 ? 9 : 11);
+      for (let i = 0; i + 1 < text.length; i += 2) put(ALNUM.indexOf(text[i]) * 45 + ALNUM.indexOf(text[i + 1]), 11);
+      if (text.length % 2) put(ALNUM.indexOf(text[text.length - 1]), 6);
+    } else {
+      put(4, 4); put(bytes.length, ver < 10 ? 8 : 16); bytes.forEach(b => put(b, 8));
+    }
+    put(0, Math.min(4, dataCw * 8 - bits.length));
+    put(0, (8 - bits.length % 8) % 8);
+    for (let pad = 0xEC; bits.length < dataCw * 8; pad ^= 0xEC ^ 0x11) put(pad, 8);
+    const data = [];
+    for (let i = 0; i < bits.length; i += 8) data.push(parseInt(bits.slice(i, i + 8).join(''), 2));
+
+    /* ---- split into blocks, add error correction, interleave ---- */
+    const ecLen = spec[0], div = rsDivisor(ecLen), blocks = [];
+    let k = 0;
+    for (const [n, len] of spec.slice(1)) for (let b = 0; b < n; b++) { const d = data.slice(k, k + len); k += len; blocks.push({d, e: rsRemainder(d, div)}); }
+    const cw = [];
+    const maxLen = Math.max(...blocks.map(b => b.d.length));
+    for (let i = 0; i < maxLen; i++) blocks.forEach(b => { if (i < b.d.length) cw.push(b.d[i]); });
+    for (let i = 0; i < ecLen; i++) blocks.forEach(b => cw.push(b.e[i]));
+
+    /* ---- function patterns ---- */
+    const size = ver * 4 + 17;
+    const mod = Array.from({length: size}, () => new Array(size).fill(false));
+    const fn = Array.from({length: size}, () => new Array(size).fill(false));
+    const setF = (x, y, d) => { mod[y][x] = d; fn[y][x] = true; };
+    for (let i = 0; i < size; i++) { setF(6, i, i % 2 === 0); setF(i, 6, i % 2 === 0); }
+    for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]])
+      for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+        const x = cx + dx, y = cy + dy, d = Math.max(Math.abs(dx), Math.abs(dy));
+        if (x >= 0 && x < size && y >= 0 && y < size) setF(x, y, d !== 2 && d !== 4);
+      }
+    const al = ALIGN[ver], last = al.length - 1;
+    for (let i = 0; i <= last; i++) for (let j = 0; j <= last; j++) {
+      if ((i === 0 && j === 0) || (i === 0 && j === last) || (i === last && j === 0)) continue;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) setF(al[i] + dx, al[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+    }
+    const drawFormat = mask => {
+      const d = ECL_BITS[ecl] << 3 | mask;
+      let r = d; for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+      const f = ((d << 10) | r) ^ 0x5412, bit = i => ((f >>> i) & 1) === 1;
+      for (let i = 0; i <= 5; i++) setF(8, i, bit(i));
+      setF(8, 7, bit(6)); setF(8, 8, bit(7)); setF(7, 8, bit(8));
+      for (let i = 9; i < 15; i++) setF(14 - i, 8, bit(i));
+      for (let i = 0; i < 8; i++) setF(size - 1 - i, 8, bit(i));
+      for (let i = 8; i < 15; i++) setF(8, size - 15 + i, bit(i));
+      setF(8, size - 8, true);
+    };
+    drawFormat(0);
+    if (ver >= 7) {
+      let r = ver; for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1F25);
+      const v = ver << 12 | r;
+      for (let i = 0; i < 18; i++) { const b = ((v >>> i) & 1) === 1, a = size - 11 + i % 3, c = Math.floor(i / 3); setF(a, c, b); setF(c, a, b); }
+    }
+
+    /* ---- codewords, zig-zag from the bottom right ---- */
+    let i = 0;
+    for (let right = size - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+        const x = right - j, up = ((right + 1) & 2) === 0, y = up ? size - 1 - vert : vert;
+        if (!fn[y][x] && i < cw.length * 8) { mod[y][x] = ((cw[i >>> 3] >>> (7 - (i & 7))) & 1) === 1; i++; }
+      }
+    }
+
+    /* ---- masking: try all eight, keep the lowest penalty ---- */
+    const MASKS = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x, y) => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
+      (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => x * y % 2 + x * y % 3 === 0,
+      (x, y) => (x * y % 2 + x * y % 3) % 2 === 0, (x, y) => ((x + y) % 2 + x * y % 3) % 2 === 0];
+    const applyMask = m => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fn[y][x] && MASKS[m](x, y)) mod[y][x] = !mod[y][x]; };
+    const penalty = () => {
+      let p = 0, dark = 0;
+      const line = get => {
+        let run = 1;
+        const seq = [];
+        for (let a = 0; a < size; a++) seq.push(get(a));
+        for (let a = 1; a <= size; a++) {
+          if (a < size && seq[a] === seq[a - 1]) run++;
+          else { if (run >= 5) p += run - 2; run = 1; }
+        }
+        const s = seq.map(Number).join(''), pat = /(?=(00001011101|10111010000))/g;
+        p += 40 * ((s.match(pat) || []).length);
+        if (s.startsWith('1011101')) p += 40;          // finder-like pattern touching the quiet zone
+        if (s.endsWith('1011101')) p += 40;
+      };
+      for (let y = 0; y < size; y++) line(x => mod[y][x]);
+      for (let x = 0; x < size; x++) line(y => mod[y][x]);
+      for (let y = 0; y + 1 < size; y++) for (let x = 0; x + 1 < size; x++) {
+        const c = mod[y][x];
+        if (c === mod[y][x + 1] && c === mod[y + 1][x] && c === mod[y + 1][x + 1]) p += 3;
+      }
+      mod.forEach(r => r.forEach(d => dark += d));
+      p += 10 * Math.floor(Math.abs(dark * 20 - size * size * 10) / (size * size));
+      return p;
+    };
+    let best = forceMask, bestP = Infinity;
+    if (best < 0) for (let m = 0; m < 8; m++) {
+      applyMask(m); drawFormat(m);
+      const p = penalty(); if (p < bestP) { bestP = p; best = m; }
+      applyMask(m);
+    }
+    applyMask(best); drawFormat(best);
+    return {size, version: ver, mask: best, dark: (x, y) => mod[y][x]};
+  }
+
+  /* SVG with a quiet zone of `quiet` modules; merges dark runs per row so the print is crisp */
+  function svg(text, quiet = 2, ecl = 'M') {
+    const q = encode(text, ecl), n = q.size + 2 * quiet;
+    let d = '';
+    for (let y = 0; y < q.size; y++) for (let x = 0; x < q.size; ) {
+      if (!q.dark(x, y)) { x++; continue; }
+      let e = x; while (e < q.size && q.dark(e, y)) e++;
+      d += 'M' + (x + quiet) + ' ' + (y + quiet) + 'h' + (e - x) + 'v1h' + (x - e) + 'z';
+      x = e;
+    }
+    return '<svg viewBox="0 0 ' + n + ' ' + n + '" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg"><rect width="' + n + '" height="' + n + '" fill="#fff"/><path d="' + d + '" fill="#000"/></svg>';
+  }
+  return {encode, svg, ALNUM};
+})();
+
+
+/* ============ a. SCHEDULE ============
+   The "circle method": hold the first player still and rotate everyone else one
+   step each game. Everyone plays someone different every game. With an odd number
+   of players a dummy slot (-1) is added, so one player sits out each game (a bye). */
+function schedule(N) {
+  let arr = Array.from({length: N}, (_, i) => i);
+  if (N % 2) arr.push(-1);
+  const M = arr.length, games = [];
+  for (let r = 0; r < M - 1; r++) {
+    const pairs = [];
+    for (let i = 0; i < M / 2; i++) pairs.push([arr[i], arr[M - 1 - i]]);
+    games.push(pairs);
+    arr = [arr[0], arr[M - 1], ...arr.slice(1, M - 1)];
+  }
+  return games;
+}
+/* Table assignment. For each game, give every match a table, choosing the table that
+   the two players have used least so far. That spreads everyone across the tables
+   instead of leaving some players parked at one board. The result is worked out once
+   (plan[game][match]) so both players' cards always agree. */
+function assignTablesOnce(sched, G, T, N, seed) {
+  const rand = mulberry32(seed + 1);
+  const used = Array.from({length: N}, () => new Array(T).fill(0));
+  const plan = [];
+  for (let g = 0; g < G; g++) {
+    const pairs = sched[g % sched.length].filter(([a, b]) => a !== -1 && b !== -1);
+    const order = pairs.map((_, k) => k);
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }   // vary who picks first
+    const free = new Set();
+    const row = new Array(pairs.length);
+    for (const k of order) {
+      if (free.size === 0) for (let t = 0; t < T; t++) free.add(t);    // more matches than tables: tables repeat
+      const [a, b] = pairs[k];
+      let best = -1, bestCost = Infinity;
+      for (const t of free) {
+        const cost = used[a][t] * used[a][t] + used[b][t] * used[b][t] + t * 0.001;
+        if (cost < bestCost) { bestCost = cost; best = t; }
+      }
+      row[k] = best + 1;
+      used[a][best]++; used[b][best]++;
+      free.delete(best);
+    }
+    plan.push(row);
+  }
+  let score = 0;                                   // lower = players are spread more evenly
+  for (const u of used) for (const c of u) score += c * c;
+  return {plan, score};
+}
+/* A small seeded random number generator, so the same settings always give the same tables. */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+/* Try several orderings and keep the most even one. */
+function assignTables(sched, G, T, N) {
+  let best = null;
+  for (let seed = 0; seed < 40; seed++) {
+    const r = assignTablesOnce(sched, G, T, N, seed);
+    if (!best || r.score < best.score) best = r;
+  }
+  return best.plan;
+}
+
+/* Opponent and table for player p in game g (zero-based). Opponent is -1 for a bye.
+   If more games are asked for than the schedule has, it starts over. */
+function matchFor(sched, p, g, plan) {
+  let k = 0;                                   // counts real matches, so a bye never uses up a table
+  for (const [a, b] of sched[g % sched.length]) {
+    if (a === -1 || b === -1) {
+      if (a === p || b === p) return {opp: -1, table: null};
+      continue;
+    }
+    if (a === p || b === p) return {opp: a === p ? b : a, table: plan ? plan[g][k] : null};
+    k++;
+  }
+  return {opp: -1, table: null};
+}
+
+/* ============ b. LAYOUT ============
+   Works out how many columns the games go in and how tall each game block can be,
+   given the paper, the cards per page, and the number of games. */
+const PAPER = { LTR: {w: 215.9, h: 279.4, name: 'Letter', tag: 'LTR'}, A4: {w: 210, h: 297, name: 'A4', tag: 'A4'} };
+const SHEET_MARGIN = 7;      // mm of blank border around the whole sheet
+const MIN_BLOCK = 9.4;       // smallest game block (mm) we are willing to print
+
+function layout(G, per, paper, half, vertical) {
+  /* Vertical cards: 1 per page uses a portrait sheet; 2 per page uses a landscape
+     sheet with the cards side by side (cut once down the middle).
+     Horizontal cards: portrait sheet, cards stacked top to bottom. */
+  const landscape = vertical && per === 2;
+  const sw = landscape ? paper.h : paper.w;
+  const sh = landscape ? paper.w : paper.h;
+  const cellW = landscape ? (sw - 2 * SHEET_MARGIN) / per : sw - 2 * SHEET_MARGIN;
+  const cellH = landscape ? sh - 2 * SHEET_MARGIN : (sh - 2 * SHEET_MARGIN) / per;
+  const contentH = cellH - 20.5, contentW = cellW - 20.5;     // keeps content clear of the corner markers
+  const avail = contentH - 32.5;               // height left for game blocks after header, column labels, footer
+  const bandH = half ? 7 : 0;
+  let res = null;
+  for (const cols of (vertical ? [1] : [1, 2])) {   // vertical cards are too narrow for two columns
+    const rows = Math.ceil(G / cols);
+    const bh = Math.min(cols === 1 ? 16 : 14, (avail - bandH) / rows);
+    if (bh >= MIN_BLOCK) { res = {cols, bh, fits: true}; break; }
+  }
+  if (!res) {
+    const cols = vertical ? 1 : 2;
+    res = {cols, bh: Math.max(4, (avail - bandH) / Math.ceil(G / cols)), fits: false};
+  }
+  res.maxGames = Math.floor((avail - bandH) / MIN_BLOCK) * (vertical ? 1 : 2);
+  const colW = res.cols === 1 ? contentW : (contentW - 6) / 2;
+  const numw = 8, gap = 1;
+  const totw = clamp(colW * 0.09, 10, 14);
+  const oppw = clamp(colW * 0.2, 17, 30);
+  const roundW = (colW - numw - totw - oppw - 6 * gap) / 4;
+  res.bd = Math.max(2.5, Math.min(4.2, (roundW - 2) / 3));     // bubble diameter
+  res.bubblesOk = res.bd >= 3.2;
+  Object.assign(res, {numw, totw, oppw, gap, sw, sh, landscape, rowFlow: landscape});
+  return res;
+}
+
+/* ============ c. DRAWING ============ */
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function cardHTML(i, ctx) {
+  const L = ctx.L, num = ctx.pad(ctx.base + i + 1);
+  const name = ctx.names[i] || '';
+  const half = '<div class="half"><span>Halfway scan point</span><span>Points so far<i class="bx" style="display:block"></i></span><span>20s so far<i class="bx" style="display:block"></i></span></div>';
+  const head = '<div class="ch"><span>Game</span><span>Round 1</span><span>Round 2</span><span>Round 3</span><span>Round 4</span><span>Total</span><span>Opponent</span></div>';
+
+  const block = g => {
+    const m = ctx.prefill ? matchFor(ctx.sched, i, g, ctx.plan) : null;
+    const o = m ? m.opp : null;
+    const bye = m && o === -1;
+    let h = '<div class="blk" style="height:' + L.bh.toFixed(2) + 'mm"><div class="n">' + (g + 1) +
+            (m && ctx.showTables && m.table ? '<small>T' + m.table + '</small>' : '') + '</div>';
+    for (let r = 0; r < 4; r++)
+      h += bye ? '<div class="rc hatch"></div>'
+               : '<div class="rc"><span class="b">2</span><span class="b">1</span><span class="b">0</span></div>';
+    h += '<div class="bx" data-t="pts"></div>';
+    if (!ctx.prefill) h += '<div class="bx" data-t="opp #"></div>';
+    else if (bye) h += '<div class="opp"><b>BYE</b></div>';
+    else h += '<div class="opp"><b>vs #' + ctx.pad(ctx.base + o + 1) + '</b>' + (ctx.names[o] && L.bh >= 13.5 ? '<em>' + esc(ctx.names[o]) + '</em>' : '') + '</div>';
+    for (let r = 0; r < 4; r++) h += '<div class="bx" data-t="20s"></div>';
+    h += '<div class="bx" data-t="20s"></div><div class="bx" data-t="init / ID"></div></div>';
+    return h;
+  };
+
+  const col = (from, to, withBand) => {
+    let h = '<div class="col">' + head;
+    for (let g = from; g < to; g++) {
+      h += block(g);
+      if (ctx.half && L.cols === 1 && g + 1 === ctx.halfAfter) h += half;   // single column: band sits between games
+    }
+    if (withBand) h += half;                                                // two columns: band closes the first column
+    return h + '</div>';
+  };
+
+  let cols;
+  if (L.cols === 1) cols = col(0, ctx.G, false);
+  else {
+    const first = Math.ceil(ctx.G / 2);
+    cols = col(0, first, ctx.half) + col(first, ctx.G, false);
+  }
+
+  const vars = '--numw:' + L.numw + 'mm;--totw:' + L.totw + 'mm;--oppw:' + L.oppw + 'mm;--gap:' + L.gap + 'mm;--bd:' + L.bd.toFixed(2) + 'mm';
+  return '<div class="card" style="' + vars + '">' +
+    '<i class="mk tl"></i><i class="mk tr"></i><i class="mk bl"></i><i class="mk br"></i>' +
+    '<div class="cin">' +
+      '<div class="hdr"><div class="hl"><div class="tn">' + esc(ctx.tname) + (ctx.groupLabel ? '<span class="gl">' + esc(ctx.groupLabel) + '</span>' : '') + '</div>' +
+        '<div class="fields"><span class="f grow">Name<u>' + esc(name) + '</u></span>' +
+        '<span class="f">ID<b>#' + num + '</b></span>' +
+        (ctx.catOn ? '<span class="f">' + esc(ctx.catLabel) + '<u style="min-width:18mm">' + esc(ctx.cat) + '</u></span>' : '') + '</div></div>' +
+        '<div class="qr">' + QR.svg(qrText(ctx.tcode, num), 2) + '</div></div>' +
+      '<div class="cols">' + cols + '</div>' +
+      '<div class="ftr"><div class="code">' + esc(ctx.tcode) + '-' + num + '<br>' + ctx.tmpl + '</div>' +
+        '<div class="tots"><span>Total points<i class="bx"></i></span><span>Total 20s<i class="bx"></i></span><span>Official\'s initials<i class="bx"></i></span></div></div>' +
+    '</div></div>';
+}
+
+function sheetHTML(cardIdx, ctx) {
+  let cells = '';
+  for (let k = 0; k < ctx.per; k++)
+    cells += '<div class="cell">' + (cardIdx[k] !== undefined ? cardHTML(cardIdx[k], ctx) : '') + '</div>';
+  return '<section class="sheet"><div class="cells' + (ctx.L.rowFlow ? ' row' : '') + '">' + cells + '</div></section>';
+}
+
+function rosterHTML(ctx) {
+  let h = '<section class="sheet roster"><h2>' + esc(ctx.tname) + (ctx.groupLabel ? ', ' + esc(ctx.groupLabel) : '') + ': roster' + (ctx.prefill ? ' and schedule' : '') + '</h2>' +
+          '<p class="rn">Tournament code ' + esc(ctx.tcode) + '.' + (ctx.groupNote ? ' ' + esc(ctx.groupNote) : '') +
+          (ctx.prefill ? ' Cells show the opponent\'s number' + (ctx.showTables ? ' and table (T)' : '') + ' in each game.' : '') + '</p>' +
+          '<table><thead><tr><th>#</th><th>Name</th>';
+  if (ctx.prefill) for (let g = 0; g < ctx.G; g++) h += '<th>G' + (g + 1) + '</th>';
+  h += '</tr></thead><tbody>';
+  for (let i = 0; i < ctx.size; i++) {
+    h += '<tr><td><b>' + ctx.pad(ctx.base + i + 1) + '</b></td><td class="nm">' + esc(ctx.names[i] || '') + '</td>';
+    if (ctx.prefill) for (let g = 0; g < ctx.G; g++) {
+      const m = matchFor(ctx.sched, i, g, ctx.plan);
+      h += '<td>' + (m.opp === -1 ? 'bye' : ctx.pad(ctx.base + m.opp + 1) + (ctx.showTables ? ' <span class="tb">T' + m.table + '</span>' : '')) + '</td>';
+    }
+    h += '</tr>';
+  }
+  h += '</tbody></table>';
+  /* pairings by table: one row per table, one column per game, for posting at the venue */
+  if (ctx.prefill && ctx.showTables) {
+    h += '<h3>Pairings by table</h3><table><thead><tr><th>Table</th>';
+    for (let g = 0; g < ctx.G; g++) h += '<th>G' + (g + 1) + '</th>';
+    h += '</tr></thead><tbody>';
+    const grid = Array.from({length: ctx.T}, () => Array.from({length: ctx.G}, () => []));
+    for (let g = 0; g < ctx.G; g++) {
+      let k = 0;
+      for (const [a, b] of ctx.sched[g % ctx.sched.length]) {
+        if (a === -1 || b === -1) continue;
+        grid[ctx.plan[g][k] - ctx.tableOffset - 1][g].push(ctx.pad(ctx.base + a + 1) + ' v ' + ctx.pad(ctx.base + b + 1));
+        k++;
+      }
+    }
+    for (let t = 0; t < ctx.T; t++) {
+      h += '<tr><td><b>' + (t + 1 + ctx.tableOffset) + '</b></td>';
+      for (let g = 0; g < ctx.G; g++) h += '<td class="pr">' + (grid[t][g].join('<br>') || '') + '</td>';
+      h += '</tr>';
+    }
+    h += '</tbody></table>';
+  }
+  return h + '</section>';
+}
+
+/* ============ d. WIRING ============ */
+const $ = id => document.getElementById(id);
+
+/* Hands out tables to the groups as consecutive blocks (group 1 gets tables 1 to 5,
+   group 2 gets 6 to 10, and so on). Each group needs half its players in tables.
+   Spare tables are shared out one at a time; if there aren't enough, tables are
+   shared in proportion, and with fewer tables than groups everyone shares. */
+function allocateTables(sizes, total) {
+  const needs = sizes.map(s => Math.floor(s / 2));
+  const need = needs.reduce((a, b) => a + b, 0);
+  const T = clamp(total || need, 1, 200);
+  let counts, shared = false;
+  if (T >= need) {
+    counts = needs.slice();
+    for (let e = T - need, i = 0; e > 0; e--, i++) counts[i % counts.length]++;
+  } else if (T >= sizes.length) {
+    counts = needs.map(n => Math.max(1, Math.floor(T * n / need)));
+    let diff = T - counts.reduce((a, b) => a + b, 0);
+    while (diff !== 0) {
+      let pick = -1, score = diff > 0 ? Infinity : -Infinity;
+      counts.forEach((c, i) => {
+        const r = c / needs[i];
+        if (diff > 0 ? r < score : (c > 1 && r > score)) { score = r; pick = i; }
+      });
+      if (pick < 0) break;
+      counts[pick] += diff > 0 ? 1 : -1;
+      diff += diff > 0 ? -1 : 1;
+    }
+  } else {
+    counts = sizes.map(() => T);
+    shared = true;
+  }
+  let start = 0;
+  const groups = counts.map(c => { const g = {start: shared ? 0 : start, count: c}; if (!shared) start += c; return g; });
+  return {groups, T, need, short: T < need, shared};
+}
+
+function render() {
+  const paper = PAPER[$('paper').value];
+  const vertical = $('orient').value === 'V';
+  /* 3 per page only works with horizontal cards, so switch it off for vertical ones */
+  const opt3 = Array.from($('per').options).find(o => o.value === '3');
+  opt3.disabled = vertical;
+  if (vertical && $('per').value === '3') $('per').value = '2';
+  $('per3tip').hidden = !vertical;
+  const per = +$('per').value;
+  const G = clamp(parseInt($('games').value) || 1, 1, 30);
+  const prefill = $('sched').value === 'F';
+  const grouped = $('mode').value === 'G';
+  $('tblBox').hidden = !prefill;
+  $('gsizeBox').hidden = !grouped;
+  $('gamesLbl').textContent = grouped ? 'Games per card (at most)' : 'Games per card';
+  $('tblLbl').textContent = grouped ? 'Tables in total, shared out between groups (blank = just enough)' : 'Tables available (blank = just enough)';
+  $('catRow').hidden = !$('catOn').checked;
+  const notes = [], warns = new Set();
+
+  let names = $('names').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (names.length === 1) { warns.add('Add at least two names, or clear the box to use the number above.'); names = []; }
+  if ($('sort').checked) names.sort((a, b) => a.localeCompare(b));
+  const N = names.length >= 2 ? names.length : clamp(parseInt($('count').value) || 2, 2, 200);
+  $('count').disabled = names.length >= 2;
+
+  /* split into groups by list order; sizes differ by at most one */
+  let sizes = [N];
+  if (grouped) {
+    const gsize = clamp(parseInt($('gsize').value) || 8, 2, 200);
+    const k = Math.max(1, Math.min(Math.ceil(N / gsize), Math.floor(N / 2)));
+    sizes = Array.from({length: k}, (_, i) => Math.floor(N / k) + (i < N % k ? 1 : 0));
+  }
+  const multi = sizes.length > 1;
+
+  const showTables = prefill && $('tblOn').checked;
+  const alloc = allocateTables(sizes, parseInt($('tables').value) || 0);
+  const digits = Math.max(2, String(N).length);
+  const common = {
+    N, per, prefill, showTables,
+    pad: n => String(n).padStart(digits, '0'),
+    tname: $('tname').value.trim() || 'Crokinole tournament',
+    tcode: ($('tcode').value.trim() || 'XXXX').toUpperCase(),
+    catOn: $('catOn').checked, catLabel: $('catLabel').value.trim(), cat: $('cat').value.trim()
+  };
+
+  /* one self-contained set of cards (and one schedule) per group */
+  const gctxs = [];
+  let base = 0;
+  sizes.forEach((size, gi) => {
+    const sched = prefill ? schedule(size) : null;
+    const Gg = prefill && multi ? Math.min(G, sched.length) : G;   // inside a group, opponents never repeat
+    const half = $('half').checked && Gg >= 4;
+    const L = layout(Gg, per, paper, half, vertical);
+    const ta = alloc.groups[gi];
+    const plan = showTables ? assignTables(sched, Gg, ta.count, size).map(row => row.map(t => t + ta.start)) : null;
+    gctxs.push(Object.assign({}, common, {
+      base, size, G: Gg, half, L, sched, plan,
+      names: names.slice(base, base + size),
+      halfAfter: Math.ceil(Gg / 2),
+      T: ta.count, tableOffset: ta.start,
+      groupLabel: multi ? 'Group ' + (gi + 1) : '',
+      groupNote: multi ? 'Players ' + common.pad(base + 1) + ' to ' + common.pad(base + size) + (showTables ? ', tables ' + (ta.start + 1) + ' to ' + (ta.start + ta.count) : '') + '.' : '',
+      tmpl: 'v3-' + paper.tag + '-' + (vertical ? 'V' : 'H') + per + 'up-g' + Gg + '-c' + L.cols + '-' + (half ? 'h' : 'n')
+    }));
+    base += size;
+  });
+
+  LAST = {gctxs, common, names, N, prefill, vertical, per, paper};
+  const sheets = [];
+  let cardSheets = 0;
+  for (const c of gctxs) {
+    for (let s = 0; s < c.size; s += per) {
+      sheets.push(sheetHTML(Array.from({length: Math.min(per, c.size - s)}, (_, k) => s + k), c));
+      cardSheets++;
+    }
+  }
+  if ($('roster').checked) for (const c of gctxs) sheets.push(rosterHTML(c));
+
+  const L0 = gctxs[0].L;
+  $('pg').textContent = '@page{size:' + L0.sw + 'mm ' + L0.sh + 'mm;margin:0}';
+  const out = $('out');
+  out.style.setProperty('--sw', L0.sw + 'mm');
+  out.style.setProperty('--sh', L0.sh + 'mm');
+  out.innerHTML = sheets.join('');
+
+  /* ---- messages ---- */
+  notes.push(N + ' cards on ' + cardSheets + ' sheet' + (cardSheets === 1 ? '' : 's') + ($('roster').checked ? ' plus ' + (multi ? 'roster pages' : 'a roster page') : '') + ' (' + paper.name + ', ' + per + ' per page).');
+  if (L0.landscape) notes.push('This prints on landscape paper: two vertical cards side by side. Cut once down the middle. If your print dialog doesn\'t switch to landscape by itself, choose it.');
+  if (!vertical) notes.push('Games are laid out in ' + L0.cols + ' column' + (L0.cols === 1 ? '' : 's') + '.');
+  if (multi) {
+    notes.push(sizes.length + ' groups of ' + sizes.join(', ') + ' players. Each group plays its own round robin; cards are printed group by group.');
+    if (prefill) notes.push('Games per group: ' + gctxs.map((c, i) => 'Group ' + (i + 1) + ': ' + c.G).join(', ') + '.');
+  }
+  if (showTables) {
+    const matches = alloc.need;
+    if (alloc.shared) warns.add('There are fewer tables (' + alloc.T + ') than groups (' + sizes.length + '), so groups would have to share tables.');
+    else if (alloc.short) warns.add('Only ' + alloc.T + ' table' + (alloc.T === 1 ? '' : 's') + ' for ' + matches + ' matches per game: some matches would have to be played in waves. The cards don\'t say which wave.');
+    else if (alloc.T > matches) notes.push('You have ' + (alloc.T - matches) + ' spare table' + (alloc.T - matches === 1 ? '' : 's') + ' beyond the ' + matches + ' needed. Spares are used to move players between boards, so some tables sit empty in each game.');
+    if (multi && !alloc.shared) notes.push('Tables: ' + gctxs.map((c, i) => 'Group ' + (i + 1) + ' tables ' + (c.tableOffset + 1) + ' to ' + (c.tableOffset + c.T)).join('; ') + '.');
+  }
+  if (prefill && names.length && gctxs.some(c => c.L.bh < 13.5)) notes.push('Opponent names don\'t fit on some cards at this size, so those show opponent numbers only. The roster page lists the names.');
+  if (!prefill) notes.push('Open schedule: players write in who they played. The roster page lists participants only.');
+  if (prefill && sizes.some(n => n % 2)) notes.push('Where a group has an odd number of players, each one gets a bye game, marked BYE.');
+  if (prefill && !multi && G > gctxs[0].sched.length) warns.add('A full round robin for ' + N + ' participants is ' + gctxs[0].sched.length + ' games. From game ' + (gctxs[0].sched.length + 1) + ' on, opponents repeat.');
+  const worst = gctxs.find(c => !c.L.fits);
+  if (worst) warns.add('Too many games for this layout: about ' + worst.L.maxGames + ' is the most that fit. Try fewer games' + (vertical ? ' or 1 card per page.' : ' or fewer cards per page.'));
+  const small = gctxs.find(c => c.L.fits && !c.L.bubblesOk);
+  if (small) warns.add('The bubbles are small at this size (' + small.L.bd.toFixed(1) + ' mm), which may make scanning less reliable. Try fewer cards per page.');
+  if ($('half').checked && gctxs.every(c => c.G < 4)) notes.push('The halfway point needs at least 4 games, so it was left off.');
+  $('msgs').innerHTML = notes.map(t => '<p>' + t + '</p>').join('') + Array.from(warns).map(t => '<p class="warn">' + t + '</p>').join('');
+}
+
+/* ============ e. PUBLISH FOR SCANNING ============
+   Sends the players, who plays whom in each game, tables, and the exact printed position of every
+   bubble (measured from the preview) to the results sheet. The scan page reads cards with this. */
+let LAST = null;
+const BASE_BUBBLE_MM = 4.2;            // the reader's empty-bubble reference images are for 4.2 mm bubbles
+
+function measureTemplate(card) {
+  const PX = 96 / 25.4, R = el => el.getBoundingClientRect();
+  const mk = c => { const r = R(card.querySelector('.mk.' + c)); return [(r.left + r.width / 2) / PX, (r.top + r.height / 2) / PX]; };
+  const raw = {tl: mk('tl'), tr: mk('tr'), bl: mk('bl'), br: mk('br')}, [ox, oy] = raw.tl;
+  const rd = v => Math.round(v * 100) / 100;
+  const markers = {};
+  for (const k in raw) markers[k] = [rd(raw[k][0] - ox), rd(raw[k][1] - oy)];
+  const b = [];
+  card.querySelectorAll('.blk').forEach((blk, gi) => blk.querySelectorAll('.rc').forEach((rc, ri) => rc.querySelectorAll('.b').forEach(e => {
+    const r = R(e); b.push([gi + 1, ri + 1, parseInt(e.textContent), rd((r.left + r.width / 2) / PX - ox), rd((r.top + r.height / 2) / PX - oy), rd(r.width / PX)]);
+  })));
+  const q = R(card.querySelector('.qr'));
+  return {markers, orientation_marker: 'tl_large', b, qr: {x: rd(q.left / PX - ox), y: rd(q.top / PX - oy), w: rd(q.width / PX), h: rd(q.height / PX)}};
+}
+
+function buildSetup() {
+  const {gctxs, common, names} = LAST, cards = document.querySelectorAll('#out .card');
+  const setup = {v: 1, code: common.tcode, name: common.tname, unplayed: $('unplayed').value, players: {}, opp: {}, tables: {}, groups: [], templates: {}};
+  let first = 0;
+  gctxs.forEach((c, gi) => {
+    const card = cards[first];
+    if (!setup.templates[c.tmpl.toUpperCase()]) setup.templates[c.tmpl.toUpperCase()] = measureTemplate(card);
+    setup.groups.push({label: c.groupLabel || '', games: c.G, template: c.tmpl.toUpperCase()});
+    for (let i = 0; i < c.size; i++) {
+      const num = common.pad(c.base + i + 1);
+      setup.players[num] = {name: c.names[i] || '', group: gi};
+      setup.opp[num] = []; setup.tables[num] = [];
+      for (let g = 0; g < c.G; g++) {
+        const m = matchFor(c.sched, i, g, c.plan);
+        setup.opp[num].push(m.opp === -1 ? null : common.pad(c.base + m.opp + 1));
+        setup.tables[num].push(m.table || null);
+      }
+    }
+    first += c.size;
+  });
+  return setup;
+}
+
+async function publish() {
+  const msg = $('pubMsg'), say = (t, bad) => { msg.textContent = t; msg.style.color = bad ? '#b3261e' : ''; };
+  if (!CFG.api) return say('This copy of the generator isn\'t connected to a results sheet. Open it from your scorecard website (see SETUP.md).', true);
+  if (!LAST || !LAST.prefill) return say('Scanning needs a fixed schedule (opponents printed on the cards). Choose "Fixed schedule" above.', true);
+  if (!LAST.vertical || LAST.gctxs.some(c => Math.abs(c.L.bd - BASE_BUBBLE_MM) > 0.05)) return say('Scanning works with vertical cards for now. Choose "Vertical" card shape.', true);
+  if (LAST.gctxs.some(c => !c.L.fits)) return say('Too many games for this layout: fix that first.', true);
+  let key = '';
+  try { key = localStorage.getItem('crokKey') || ''; if (!key) { key = randomCode() + randomCode(); localStorage.setItem('crokKey', key); } } catch (e) { key = 'nokey'; }
+  const setup = buildSetup();
+  say('Publishing…');
+  try {
+    const res = await fetch(CFG.api, {method: 'POST', body: JSON.stringify({action: 'setup', t: setup.code, name: setup.name, key, setup}), headers: {'Content-Type': 'text/plain;charset=utf-8'}});
+    const j = await res.json();
+    if (!j.ok) return say(j.error || 'The results sheet refused it.', true);
+    const site = (CFG.site || '').toLowerCase();
+    msg.innerHTML = 'Published tournament <b>' + esc(setup.code) + '</b> (' + Object.keys(setup.players).length + ' players). Now print. Standings: <a target="_blank" href="' + esc(site + 't/' + setup.code) + '">' + esc(site + 't/' + setup.code) + '</a>';
+    msg.style.color = '';
+  } catch (e) { say('Couldn\'t reach the results sheet: ' + e.message, true); }
+}
+
+/* A short random code that avoids look-alike characters (no 0/O, 1/I/L). */
+function randomCode() {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  return Array.from({length: 4}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
+
+$('tcode').value = randomCode();
+document.querySelectorAll('.panel input, .panel select, .panel textarea').forEach(el => el.addEventListener('input', render));
+$('print').addEventListener('click', () => window.print());
+$('publish').addEventListener('click', publish);
+render();
+</script>
+</body>
+</html>
